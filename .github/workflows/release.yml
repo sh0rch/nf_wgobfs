@@ -80,11 +80,14 @@ jobs:
       run: |
         cross build --release --target ${{ matrix.target }} 
 
-    - name: Build with cross (mipsel)
+    - name: Install cross (mipsel-musl)
       if: matrix.target == 'mipsel-unknown-linux-musl'
       uses: taiki-e/install-action@v2
       with:
         tool: cross
+
+    - name: Build with cross (mipsel-musl)
+      if: matrix.target == 'mipsel-unknown-linux-musl'
       run: |
         cross +nightly \
           -Z build-std=std,panic_abort \
