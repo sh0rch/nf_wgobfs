@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+CFG_DIR="/etc/nf_wgobfs"
+CFG_FILE="$CFG_DIR/config"
+
+# 1) ensure directory
+if [ ! -d "$CFG_DIR" ]; then
+    install -d -m 700 -o root -g root "$CFG_DIR"
+fi
+
+# 2) first-install: copy default config
+if [ ! -f "$CFG_FILE" ]; then
+    # package puts example into same path (conffile)
+    install -m 600 -o root -g root /usr/share/doc/nf-wgobfs/config.example "$CFG_FILE"
+    echo "nf-wgobfs: default config copied to $CFG_FILE"
+fi
+
+exit 0

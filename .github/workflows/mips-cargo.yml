@@ -1,0 +1,18 @@
+name: Build mipsel rust docker Image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push
+        run: |
+          docker build -f packaging/Dockerfile.mipsel -t ghcr.io/${{ github.repository_owner }}/rust-musl-mipsel:latest .
+          docker push ghcr.io/${{ github.repository_owner }}/rust-musl-mipsel:latest

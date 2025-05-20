@@ -1,0 +1,89 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - mipsel-unknown-linux-musl
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools pkg-config libssl-dev upx curl tar gzip unzip
+          cargo install cargo-deb
+
+      - name: Install Cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=$(./get-version.sh)" >> "$GITHUB_ENV"
+
+      - name: Use target-specific cargo config
+        run: |
+          if [ -f .cargo/config.${{ matrix.target }}.toml ]; then
+            cp .cargo/config.${{ matrix.target }}.toml .cargo/config.toml
+          fi
+
+      - name: Build
+        run: |
+          FLAGS=""
+          if [[ "${{ matrix.target }}" == "mipsel-unknown-linux-musl" ]]; then
+            FLAGS="-Z build-std=std,panic_abort"
+          fi
+          cross build --release --target ${{ matrix.target }} $FLAGS
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          BIN=target/${{ matrix.target }}/release/nf_wgobfs
+
+          # 1. Raw binary
+          cp $BIN dist/nf_wgobfs-${{ matrix.target }}
+
+          # 2. Tarball
+          tar -czf dist/nf_wgobfs-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release nf_wgobfs
+
+      - name: Build .deb (only for x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          cargo deb --target ${{ matrix.target }} --no-build --package nf_wgobfs
+          cp target/${{ matrix.target }}/debian/*.deb dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nf_wgobfs-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

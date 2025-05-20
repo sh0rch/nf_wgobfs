@@ -1,0 +1,27 @@
+########################################
+#    Example config file for NF_WGOBFS
+#
+# Format:
+# QUEUE_NUM:DIRECTION:PORT:SECRET_KEY[:F|S][:MTU]
+#
+# QUEUE_NUM   - The NFQUEUE number to use (integer, e.g. 0 or 1).
+# DIRECTION   - Packet direction: "in" for incoming, "out" for outgoing.
+# # NAME        - Any string to identify the queue (e.g. "wg0-in", "wg0-out").
+# SECRET_KEY  - Any string; it will be hashed to a 32-byte key for obfuscation.
+# F|S         - (Optional) Cipher mode: F for Fast (ChaCha20, CPU optimized), S for Standard (ChaCha6).
+#               Fast mode is optimized for AVX2/SIMD CPUs and is significantly faster only on processors
+#               that support these instructions. If your CPU does not support AVX2/SIMD, it is recommended
+#               to use Standard mode for compatibility, but both modes will work on any CPU.
+#               If omitted, cipher mode is auto-detected.
+# MTU         - (Optional) MTU of the external (physical) interface, NOT the WireGuard interface.
+#               If omitted, the default is 1500.
+#
+# IMPORTANT: The cipher mode (F|S) and the secret key MUST be the same on both sides of the tunnel.
+# For example, use "in:key:F" on one side and "out:key:F" on the other side.
+#
+# Default config location: /etc/nf_wgobfs/config
+# You can override the location by setting the NF_WGOBFS_CONF environment variable.
+#
+# Example entries:
+0:in:Test:secretkey:S:1500
+1:out:Test:secretkey:S

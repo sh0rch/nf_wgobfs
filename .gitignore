@@ -1,0 +1,9 @@
+target/
+release/
+config/
+Cargo.lock
+.vscode
+**/*.rs.bk
+*.pdb
+
+

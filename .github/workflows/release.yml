@@ -1,0 +1,183 @@
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags: ["v*"]           # trigger on v1.2.3
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CONF_PATH: /etc/nf_wgobfs/config
+  CONF_MODE: "0600"
+
+###############################################################################
+# 1) Build native GNU & musl binaries
+###############################################################################
+jobs:
+  linux-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - mipsel-unknown-linux-musl
+    steps:
+    - uses: actions/checkout@v4
+
+    # ───────────── install build prereqs (GNU only) ────────────────
+    - name: Install deps (GNU targets)
+      if: ${{ !endsWith(matrix.target, '-musl') }}
+      run: sudo apt-get update -qq && sudo apt-get install -y libnetfilter-queue-dev
+
+    # ───────────── install Rust toolchain or cross ─────────────────
+    - name: Install Rust (GNU targets)
+      if: ${{ !endsWith(matrix.target, '-musl') }}
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        target: ${{ matrix.target }}
+        override: true
+
+    - name: Cache cargo registry / target (GNU)
+      if: ${{ !endsWith(matrix.target, '-musl') }}
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+    # ---- musl: install cross -------------------------------------------------
+    - name: Install cross (musl targets)
+      if: endsWith(matrix.target, '-musl')
+      run: cargo install cross --git https://github.com/cross-rs/cross --locked
+    
+    - name: Install AArch64 GNU linker
+      if: matrix.target == 'aarch64-unknown-linux-gnu'
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+        mkdir -p $HOME/.cargo
+        cat >> $HOME/.cargo/config.toml <<'EOF'
+        [target.aarch64-unknown-linux-gnu]
+        linker = "aarch64-linux-gnu-gcc"
+        EOF
+
+    # ─────────────── BUILD ─────────────────────────────────────────
+    - name: Build with cargo (GNU)
+      if: ${{ !endsWith(matrix.target, '-musl') }}
+      run: cargo build --release --target ${{ matrix.target }}
+
+    - name: Build with cross (musl)
+      if: endsWith(matrix.target, '-musl')
+      run: cross build --release --target ${{ matrix.target }}
+
+    - name: Copy binary for OpenWrt
+      if: matrix.target == 'mipsel-unknown-linux-musl'
+      run: |
+        cp target/mipsel-unknown-linux-musl/release/nf_wgobfs packaging/openwrt/files/nf_wgobfs
+        cp config.example packaging/openwrt/files/config
+        chmod +x packaging/openwrt/files/nf_wgobfs
+
+    - name: Strip binary
+      if: success() && !endsWith(matrix.target, '-musl')
+      run: strip target/${{ matrix.target }}/release/nf_wgobfs || true
+
+    # ─────────────── Build .deb (GNU only) ─────────────────────────
+    - name: Build .deb
+      if: contains(matrix.target, 'unknown-linux-gnu')
+      run: |
+        cargo install cargo-deb --locked
+        cargo deb --no-build --target ${{ matrix.target }}
+        mkdir -p dist
+        find target -path '*/debian/*.deb' -maxdepth 3 -type f -print -exec mv -t dist {} +
+
+    # ─────────────── Pack TAR (all targets) ────────────────────────
+    - name: Pack tarball
+      run: |
+        BIN_NAME=nf_wgobfs
+        BIN=target/${{ matrix.target }}/release/$BIN_NAME
+        STAGE=stage-${{ matrix.target }}
+        mkdir -p $STAGE/usr/sbin
+        mkdir -p $STAGE${CONF_PATH%/*}
+        cp $BIN $STAGE/usr/sbin/
+        install -m $CONF_MODE config.example $STAGE$CONF_PATH
+        tar --numeric-owner -C $STAGE \
+            -czf nf_wgobfs-${{ matrix.target }}.tar.gz .
+        mkdir -p dist && mv nf_wgobfs-${{ matrix.target }}.tar.gz dist/
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: linux-${{ matrix.target }}
+        path: dist/*
+
+###############################################################################
+# 2) Build OpenWrt .ipk (ramips-mt7621)
+###############################################################################
+  openwrt:
+    needs: linux-build
+    runs-on: ubuntu-latest
+    env:
+      SDK_URL: https://downloads.openwrt.org/releases/23.05.0/targets/ramips/mt7621/openwrt-sdk-23.05.0-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Fetch SDK
+      run: |
+        wget -q $SDK_URL -O sdk.tar.xz
+        tar xf sdk.tar.xz
+        mv openwrt-sdk-* sdk
+
+    - name: Cache OpenWrt downloads
+      uses: actions/cache@v4
+      with:
+        path: sdk/dl
+        key: openwrt-dl-${{ hashFiles('sdk/feeds.conf.default') }}
+
+    - name: Add nf_wgobfs OpenWrt package
+      run: |
+        mkdir -p sdk/package/nf_wgobfs
+        cp -r packaging/openwrt/* sdk/package/nf_wgobfs/
+
+    - name: Build IPK
+      run: |
+        cd sdk
+        ./scripts/feeds update -a
+        ./scripts/feeds install libnetfilter-queue
+        make defconfig
+        make package/nf_wgobfs/compile V=s -j$(nproc)
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-ipk
+        path: sdk/bin/packages/*/*/nf_wgobfs_*.ipk
+
+###############################################################################
+# 3) Combine & publish GitHub Release
+###############################################################################
+  release:
+    needs: [linux-build, openwrt]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: "*"
+        path: ./dist
+
+    - name: List artefacts
+      run: ls -R dist
+
+    - name: Publish release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: nf_wgobfs ${{ github.ref_name }}
+        generate_release_notes: true
+        files: dist/**/*.{deb,ipk,tar.gz}

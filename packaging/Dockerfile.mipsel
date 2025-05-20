@@ -1,0 +1,13 @@
+FROM messense/rust-musl-cross:mipsel-musl
+
+#RUN rustup self update && \
+#    rustup install stable && \
+#    rustup default stable && \
+#    rustup component add rust-src
+
+RUN rustup self update && \
+    rustup update stable && \
+    rustup default stable && \
+    rustup target add mipsel-unknown-linux-musl
+
+RUN rustc --version && cargo --version
