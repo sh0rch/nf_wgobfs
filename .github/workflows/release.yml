@@ -76,7 +76,7 @@ jobs:
       run: cargo build --release --target ${{ matrix.target }}
 
     - name: Build with cross (musl)
--      if: endsWith(matrix.target, '-musl') && !contains(matrix.target, 'mipsel')
+      if: endsWith(matrix.target, '-musl') && !contains(matrix.target, 'mipsel')
       run: |
         cross build --release --target ${{ matrix.target }} 
 
