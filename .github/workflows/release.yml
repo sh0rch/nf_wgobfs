@@ -94,6 +94,8 @@ jobs:
 
     - name: Build with cross (mipsel-musl)
       if: matrix.target == 'mipsel-unknown-linux-musl'
+      env:
+        RUSTFLAGS: "-C panic=abort"
       run: |
         cross +nightly \
           -Z build-std=std,panic_abort \
