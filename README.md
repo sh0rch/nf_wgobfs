@@ -22,8 +22,8 @@ The filter works over **NFQUEUE**, so it can be dropped into iptables or nftable
 ## 🔬 Packet layout (after obfuscation)
 
 ```
-[IP] [UDP] [CS] [L*] [WG_HEADER*] [WG_PAYLOAD] [MAC2*] [BALLAST] [NONCE]
-                └───── XOR ─────┘              └ XOR ┘
+[IP] [UDP] [CS] [WG_HEADER*] [WG_PAYLOAD] [BALLAST] [L*] [MAC2*] [NONCE]
+                └─── XOR ──┘                        └─── XOR ──┘
                 
 L  – ballast length (1 byte)  
 *  – encrypted bytes (ChaCha)
