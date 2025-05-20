@@ -81,14 +81,14 @@ jobs:
         rustup toolchain install nightly
         rustup component add rust-src --toolchain nightly
         rustup target add ${{ matrix.target }} --toolchain nightly
+        rustup toolchain install nightly --component rust-src
 
-    - name: Build with cross (musl)
-      if: endsWith(matrix.target, '-musl')
+    - name: Build with cross (mipsel-musl)
       run: |
         cross +nightly \
           -Z build-std=std,panic_abort \
           -Z build-std-features=panic_immediate_abort \
-          build --release --target ${{ matrix.target }}
+          build --release --target mipsel-unknown-linux-musl
 
     - name: Copy binary for OpenWrt
       if: matrix.target == 'mipsel-unknown-linux-musl'
