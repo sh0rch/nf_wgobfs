@@ -27,13 +27,14 @@ impl CipherImpl {
             {
                 println!("Using fast cipher");
             }
-            return CipherImpl::Fast(ChaCha20::new(key.into(), nonce.into()));
+            CipherImpl::Fast(ChaCha20::new(key.into(), nonce.into()))
+        } else {
+            #[cfg(debug_assertions)]
+            {
+                println!("Using fallback cipher");
+            }
+            CipherImpl::Fallback(ChaCha6::new(key, &nonce[..8]))
         }
-        #[cfg(debug_assertions)]
-        {
-            println!("Using fallback cipher");
-        }
-        return CipherImpl::Fallback(ChaCha6::new(key, &nonce[..8]));
     }
 
     #[inline]

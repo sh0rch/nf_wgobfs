@@ -1,13 +1,15 @@
 #[inline(always)]
 pub fn checksum16(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
-    let mut chunks = data.chunks_exact(2);
-    for chunk in &mut chunks {
-        let word = u16::from_be_bytes([chunk[0], chunk[1]]);
+    let len = data.len();
+    let mut i = 0;
+    while i + 1 < len {
+        let word = u16::from_be_bytes([data[i], data[i + 1]]);
         sum += word as u32;
+        i += 2;
     }
-    if let Some(&last) = chunks.remainder().get(0) {
-        sum += (last as u32) << 8;
+    if i < len {
+        sum += (data[i] as u32) << 8;
     }
     while (sum >> 16) != 0 {
         sum = (sum & 0xffff) + (sum >> 16);

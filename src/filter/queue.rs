@@ -13,7 +13,7 @@ pub fn run_nfqueue_filter(filter: FilterConfig) -> std::io::Result<()> {
             panic::catch_unwind(|| {
                 let mut q = Queue::open().map_err(|e| {
                     eprintln!("Failed to open NFQUEUE: {e}");
-                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                    std::io::Error::other(e)
                 })?;
 
                 q.bind(filter.queue_num).map_err(|e| {
@@ -23,7 +23,7 @@ pub fn run_nfqueue_filter(filter: FilterConfig) -> std::io::Result<()> {
                     Try selecting another queue through the NF_WGOBFS_QUEUE environment variable.",
                         filter.queue_num, e
                     );
-                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                    std::io::Error::other(e)
                 })?;
 
                 println!(

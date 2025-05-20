@@ -53,7 +53,6 @@ impl ChaCha6 {
                 u32::from_le_bytes([nonce[j], nonce[j + 1], nonce[j + 2], nonce[j + 3]]);
         }
         state[15] = 0;
-        print!("state: {:?}\n", state);
         Self { state }
     }
 
