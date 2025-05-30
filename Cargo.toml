@@ -1,10 +1,17 @@
 [package]
 name = "nf_wgobfs"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 authors = ["sh0rch <sh0rch@iwl.dev>"]
 description = "User-space WireGuard traffic obfuscator (NFQUEUE)"
+readme = "README.md"
+repository = "https://github.com/sh0rch/nf_wgobfs"
+homepage = "https://github.com/sh0rch/nf_wgobfs"
+keywords = ["chacha20", "crypto", "obfuscation", "wireguard", "cipher"]
+categories = ["cryptography", "algorithms", "security"]
+exclude = [".github/*", "examples/*", "target/*"]
+include = ["src/**", "README.md", "LICENSE", "Cargo.toml", "config.example"]
 
 [package.metadata.deb]
 maintainer = "sh0rch <sh0rch@iwl.dev>"
@@ -13,9 +20,6 @@ assets = [
 ]
 depends = "libnetfilter-queue1, iptables | nftables"
 maintainer-scripts = "packaging/deb"
-
-[target.aarch64-unknown-linux-musl]
-linker = "aarch64-linux-musl-gcc"
 
 [[bin]]
 name = "udp_echo"
@@ -28,7 +32,4 @@ hex = "0.4"
 nfq = "0.2.5"
 sha2 = "0.10.9"
 fastrand = "2.3.0"
-
-# ───── ciphers ─────
-chacha20 = "0.9.1"
-cpufeatures = "0.2.17"
+fast_chacha = "0.2.0"

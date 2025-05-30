@@ -1,5 +1,0 @@
-[build]
-target = "mipsel-unknown-linux-musl"
-
-[target.mipsel-unknown-linux-musl]
-linker = "mipsel-linux-musl-gcc"

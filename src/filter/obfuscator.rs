@@ -1,8 +1,49 @@
-use crate::cipher::randomiser::fill_ballast;
-use crate::cipher::{randomiser, CipherImpl};
+/*
+ * Copyright (c) 2025 sh0rch <sh0rch@iwl.dev>
+ *
+ * MIT License
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+/*!
+ * # Obfuscator module for WireGuard packets
+ *
+ * This module provides functions to obfuscate and deobfuscate WireGuard packets
+ * by encrypting selected fields and adding random ballast (padding), making traffic analysis
+ * and fingerprinting more difficult.
+ *
+ * ## Main Functions
+ * - [`obfuscate_wg_packet`]: Obfuscates a WireGuard packet in-place by encrypting selected fields,
+ *   adding random ballast, and appending a nonce.
+ * - [`deobfuscate_wg_packet`]: Reverses the obfuscation process, restoring the original packet.
+ *
+ * ## Usage
+ * Use these functions to protect WireGuard packets from fingerprinting and traffic analysis
+ * by making their structure less predictable.
+ */
+
 use crate::config::FilterConfig;
 use crate::filter::keepalive::{KeepaliveDropper, PacketDecision};
 use crate::netutils::{ipv4, ipv6};
+use crate::randomiser::fill_random;
+use fast_chacha::FastChaCha20;
 use rand::rngs::SmallRng;
 use rand::Rng;
 
@@ -10,6 +51,27 @@ const NONCE_LEN: usize = 12;
 const MAC2_LEN: usize = 16;
 const BALLAST_LEN_MAX: usize = 65;
 
+/// Obfuscates a WireGuard packet in-place.
+///
+/// This function encrypts selected fields of the WireGuard packet, adds random
+/// ballast (padding), and appends a nonce. It also updates UDP and IP headers as needed.
+///
+/// # Arguments
+/// * `buf` - Mutable buffer containing the packet data.
+/// * `len` - Length of the valid data in the buffer.
+/// * `config` - Filter configuration, including the obfuscation key and MTU.
+/// * `dropper` - KeepaliveDropper instance for filtering keepalive packets.
+/// * `rng` - Random number generator.
+///
+/// # Returns
+/// * `Some(new_len)` - The new length of the obfuscated packet.
+/// * `None` - If the packet should be dropped or an error occurred.
+///
+/// # Details
+/// - Encrypts the first 16 bytes of the WireGuard payload and the MAC2 field using ChaCha20.
+/// - Inserts random ballast (padding) to make packet sizes less predictable.
+/// - Appends a nonce for encryption.
+/// - Updates UDP and IP headers to reflect the new packet size.
 pub fn obfuscate_wg_packet(
     buf: &mut [u8],
     len: usize,
@@ -21,6 +83,7 @@ pub fn obfuscate_wg_packet(
         return Some(len);
     }
 
+    // Determine IP version and calculate start of WireGuard payload
     let ip_version = buf[0] >> 4;
     let wg_start = match ip_version {
         4 => ((buf[0] & 0x0F) as usize) * 4 + 8,
@@ -29,10 +92,6 @@ pub fn obfuscate_wg_packet(
     };
 
     if len < wg_start + 32 {
-        println!(
-            "Packet too small for obfuscation : len={} < wg_start({}) + 32",
-            len, wg_start
-        );
         return Some(len);
     }
 
@@ -41,54 +100,48 @@ pub fn obfuscate_wg_packet(
         return None;
     }
 
+    // Calculate how much random ballast can be inserted
     let max_insert = config.mtu.saturating_sub(len);
-    let max_ballast = max_insert
-        .saturating_sub(1 + NONCE_LEN)
-        .min(BALLAST_LEN_MAX);
-    let ballast_len = if max_ballast >= 3 {
-        rng.random_range(3..=max_ballast)
-    } else {
-        0
-    };
+    let max_ballast = max_insert.saturating_sub(1 + NONCE_LEN).min(BALLAST_LEN_MAX);
+    let ballast_len = if max_ballast >= 3 { rng.random_range(3..=max_ballast) } else { 0 };
 
     let new_len = len + 1 + ballast_len + NONCE_LEN;
     if new_len > buf.len() {
         return None;
     }
 
+    // Generate random nonce
     let mut nonce = [0u8; NONCE_LEN];
-    randomiser::fill_nonce(&mut nonce, rng);
+    fill_random(&mut nonce, rng);
 
-    // Prepare block for encryption
+    // Prepare block for encryption: first 16 bytes of payload, ballast length, MAC2
     let mut block = [0u8; 33];
     block[..16].copy_from_slice(&buf[wg_start..wg_start + 16]);
     block[16] = ballast_len as u8;
     block[17..].copy_from_slice(&buf[len - MAC2_LEN..len]);
 
-    let mut cipher = CipherImpl::new(&config.key, &nonce, &config.cipher_mode);
-    cipher.xor(&mut block);
+    // Encrypt block with ChaCha20
+    let mut cipher = FastChaCha20::new(&config.key, &nonce);
+    cipher.apply_keystream(&mut block);
 
+    // Write encrypted fields back to buffer
     buf[wg_start..wg_start + 16].copy_from_slice(&block[..16]);
 
-    // Place ballast after MAC2
+    // Insert random ballast instead of MAC2
     let mut offset = len - MAC2_LEN;
-    fill_ballast(&mut buf[offset..offset + ballast_len], rng);
+    fill_random(&mut buf[offset..offset + ballast_len], rng);
     offset += ballast_len;
 
-    // Place ballast length and encrypted MAC2
+    // Insert encrypted ballast length and MAC2
     buf[offset] = block[16];
     offset += 1;
     buf[offset..offset + MAC2_LEN].copy_from_slice(&block[17..]);
     offset += MAC2_LEN;
 
-    // Place nonce at the end
+    // Append nonce
     buf[offset..offset + NONCE_LEN].copy_from_slice(&nonce);
-    offset += NONCE_LEN;
 
-    if new_len != offset {
-        return None;
-    }
-
+    // Fix headers to reflect new packet size
     match ip_version {
         4 => {
             ipv4::clear_diffserv(&mut buf[..new_len]);
@@ -101,6 +154,24 @@ pub fn obfuscate_wg_packet(
     Some(new_len)
 }
 
+/// Deobfuscates a previously obfuscated WireGuard packet in-place.
+///
+/// This function reverses the obfuscation process, decrypting the selected fields,
+/// removing the ballast and nonce, and restoring the original packet structure.
+///
+/// # Arguments
+/// * `buf` - Mutable buffer containing the obfuscated packet data.
+/// * `config` - Filter configuration, including the obfuscation key.
+///
+/// # Returns
+/// * `Some(new_len)` - The new length of the deobfuscated packet.
+/// * `None` - If an error occurred.
+///
+/// # Details
+/// - Extracts and decrypts the encrypted fields using the nonce and key.
+/// - Removes the random ballast and nonce.
+/// - Restores the original MAC2 field and packet structure.
+/// - Fixes UDP and IP headers to match the restored packet.
 #[inline(always)]
 pub fn deobfuscate_wg_packet(buf: &mut [u8], config: &FilterConfig) -> Option<usize> {
     let len = buf.len();
@@ -108,41 +179,48 @@ pub fn deobfuscate_wg_packet(buf: &mut [u8], config: &FilterConfig) -> Option<us
         return Some(len);
     }
 
+    // Determine IP version and calculate start of WireGuard payload
     let ip_version = buf[0] >> 4;
     let wg_start = match ip_version {
         4 => ((buf[0] & 0x0F) as usize) * 4 + 8,
         6 => 48,
         _ => return Some(len),
     };
+    // Ensure packet is large enough for deobfuscation
     if len <= wg_start + 45 {
         return Some(len);
     }
 
-    // Extract nonce from the end
+    // Extract nonce from the end of the packet
     let nonce_offset = len - NONCE_LEN;
     let mut nonce = [0u8; NONCE_LEN];
     nonce.copy_from_slice(&buf[nonce_offset..len]);
-    let mut cipher = CipherImpl::new(&config.key, &nonce, &config.cipher_mode);
+    let mut cipher = FastChaCha20::new(&config.key, &nonce);
 
-    // Prepare block for decryption
+    // Extract encrypted block (fields + ballast length + MAC2)
     let offset = len - 1 - NONCE_LEN - MAC2_LEN;
     let mut block = [0u8; 33];
     block[..16].copy_from_slice(&buf[wg_start..wg_start + 16]);
     block[16..].copy_from_slice(&buf[offset..len - NONCE_LEN]);
 
-    cipher.xor(&mut block);
+    // Decrypt block
+    cipher.apply_keystream(&mut block);
 
+    // Restore original fields
     buf[wg_start..wg_start + 16].copy_from_slice(&block[..16]);
     let ballast_len = block[16] as usize;
 
+    // Check minimum length after removing ballast and nonce
     let min_len = ballast_len + 45;
     if len < min_len {
         return Some(len);
     }
 
+    // Calculate new length and restore MAC2
     let new_len = len - 1 - ballast_len - NONCE_LEN;
     buf[new_len - MAC2_LEN..new_len].copy_from_slice(&block[17..]);
 
+    // Fix UDP and IP headers as needed
     match ip_version {
         4 => ipv4::fix_udp_headers(&mut buf[..new_len]),
         6 => ipv6::fix_udp_headers(&mut buf[..new_len]),
@@ -154,15 +232,18 @@ pub fn deobfuscate_wg_packet(buf: &mut [u8], config: &FilterConfig) -> Option<us
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{ascii_to_key, CipherMode, Direction, FilterConfig};
+    use crate::config::{ascii_to_key, Direction, FilterConfig};
 
     use super::*;
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
 
+    /// Tests obfuscation and deobfuscation round-trip for a sample packet.
+    ///
+    /// This test ensures that after obfuscating and then deobfuscating a packet,
+    /// the result matches the original input.
     #[test]
     fn test_obfuscate_and_deobfuscate() {
-        // Provided input data
         let before: [u8; 156] = [
             0x45, 0x00, 0x00, 0x9c, 0x5e, 0x1c, 0x00, 0x00, 0x40, 0x11, 0x51, 0xf0, 0xd5, 0xa5,
             0x54, 0x5d, 0x59, 0xdf, 0x46, 0x63, 0xca, 0x6c, 0xca, 0x6c, 0x00, 0x88, 0x50, 0x44,
@@ -178,35 +259,23 @@ mod tests {
             0xff, 0x35,
         ];
 
-        // Dummy config and dropper
-        let mut config = FilterConfig {
-            mtu: 256,
-            key: [0u8; 32],
-            cipher_mode: CipherMode::Auto,
-            queue_num: 0,
-            direction: Direction::Out,
-            name: String::new(),
-        };
+        let mut config =
+            FilterConfig { mtu: 256, key: [0u8; 32], queue_num: 0, direction: Direction::Out };
         let mut dropper = KeepaliveDropper::new(0, 9);
         let mut rng = SmallRng::from_seed([0u8; 32]);
 
-        // Copy input to a buffer with extra space
         let mut buf = [0u8; 256];
         buf[..before.len()].copy_from_slice(&before);
         config.direction = Direction::Out;
-        config.cipher_mode = CipherMode::Auto;
         config.key = ascii_to_key("secretkey");
-        // Obfuscate
+
         let obf_len = obfuscate_wg_packet(&mut buf, before.len(), &config, &mut dropper, &mut rng)
             .expect("obfuscation failed");
 
-        // Deobfuscate;
         config.direction = Direction::In;
-        config.cipher_mode = CipherMode::Auto;
         let deobf_len =
             deobfuscate_wg_packet(&mut buf[..obf_len], &config).expect("deobfuscation failed");
 
-        // Check roundtrip
         assert_eq!(&buf[..deobf_len], &before[..], "deobfuscated != original");
     }
 }

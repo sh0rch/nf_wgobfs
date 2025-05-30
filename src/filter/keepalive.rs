@@ -106,7 +106,7 @@ mod tests {
     fn test_dropper_resets_on_non_keepalive() {
         let mut dropper = KeepaliveDropper::new(1, 2);
         let keepalive = [0x04, 0, 0, 0];
-        // simulate dropping
+
         dropper.drop_left = 2;
         dropper.filter_packet(&keepalive);
         let non_keepalive = [0x01, 0, 0, 0];
@@ -118,12 +118,12 @@ mod tests {
     fn test_dropper_drop_and_allow() {
         let mut dropper = KeepaliveDropper::new(1, 1);
         let keepalive = [0x04, 0, 0, 0];
-        // First keepalive triggers drop_left and pending_until
+
         let res1 = dropper.filter_packet(&keepalive);
         assert_eq!(res1, PacketDecision::Drop);
-        // drop_left is set, next keepalive should also be dropped
+
         let res2 = dropper.filter_packet(&keepalive);
-        // Depending on timing, may be Drop or Allow, but drop_left should decrease
+
         assert!(matches!(res2, PacketDecision::Drop | PacketDecision::Allow));
     }
 }

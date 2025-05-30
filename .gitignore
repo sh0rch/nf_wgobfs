@@ -5,5 +5,5 @@ Cargo.lock
 .vscode
 **/*.rs.bk
 *.pdb
-
+fast_chacha/**
 

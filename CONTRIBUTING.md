@@ -11,16 +11,13 @@ src/
 ├── main.rs             # Filter entry point
 ├── cli.rs              # CLI argument handling
 ├── config.rs           # Filter configuration
+├── randomiser.rs       # Secure nonce and ballast generation
+├── udp_echo.rs         # Simple UDP Echo client and server for testing purposes
 │
 ├── filter/
 │   ├── obfuscator.rs   # Packet obfuscation
 │   ├── keepalive.rs    # Drops keepalive packets
 │   └── queue.rs        # NFQUEUE integration
-│
-├── cipher/
-│   ├── chacha6.rs      # ChaCha6 algorithm
-│   ├── randomiser.rs   # Secure nonce and ballast generation
-│   └── mod.rs
 │
 └── netutils/
     ├── ipv4.rs         # IPv4 support (checksums, UDP)

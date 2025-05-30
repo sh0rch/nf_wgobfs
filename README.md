@@ -9,7 +9,7 @@ The filter works over **NFQUEUE**, so it can be dropped into iptables or nftable
 
 ## ✨ Features
 
-* 🔐 **Header + MAC2 obfuscation** with ChaCha (ChaCha20‑AVX2 if available, ChaCha6 fallback)  
+* 🔐 **Header + MAC2 obfuscation** with ChaCha (Fastest CPU-optimied ChaCha20 if available, pure Rust fallback)  
 * 📦 **Random ballast + nonce** → breaks length fingerprinting  
 * 🔄 **Adaptive keep‑alive dropper** — hides WG heartbeat patterns while respecting NAT TTL  
 * ⚡ **Zero‑copy hot‑path**: minimal `copy_within`, no heap per packet → multi‑Gbps  
@@ -38,12 +38,12 @@ The project is inspired by [infinet/xt_wgobfs](https://github.com/infinet/xt_wgo
 
 |                     | `xt_wgobfs` (kernel) | **nf‑wgobfs** (user‑space) |
 |---------------------|----------------------|----------------------------|
-| Layer              | kernel xt target     | NFQUEUE userspace binary   |
-| Container‑ready    | ✖                   | ✔                          |
-| Kernel upgrade pain| yes (rebuild)        | none                       |
-| AVX2 / NEON        | limited              | auto‑detect                |
-| ARM VPS            | depends              | ChaCha6 fallback           |
-| Debug logging      | `dmesg`              | CLI debug mode             |
+| Layer               | kernel xt target     | NFQUEUE userspace binary   |
+| Container‑ready     | ✖                    | ✔                         |
+| Kernel upgrade pain | yes (rebuild)        | none                       |
+| SSE2/AVX2 / NEON    | limited              | CPU optimized, auto-detect |
+| ARM VPS             | depends              | CPU optimized, auto-detect |
+| Debug logging       | `dmesg`              | CLI debug mode             |
 
 ---
 
@@ -73,8 +73,8 @@ Resulting binary: `target/release/nf-wgobfs`
 Default path is `/etc/nf_wgobfs.conf` (override with `NF_WGOBFS_CONF=/path`):
 
 ```ini
-# queue:direction:name:key[:F|S:mtu]
-1:out:wg_out:0123456789abcdef0123456789abcdef:F:1350
+# queue:direction:name:key[:mtu]
+1:out:wg_out:0123456789abcdef0123456789abcdef:1350
 2:in:wg_in:fedcba9876543210fedcba9876543210   # auto cipher, mtu 1500
 ```
 
@@ -82,10 +82,6 @@ Default path is `/etc/nf_wgobfs.conf` (override with `NF_WGOBFS_CONF=/path`):
 * **direction** – `in` or `out` (case‑insensitive).
 * **name** – Free‑form tag for logs.
 * **key** – 32‑byte hex ASCII (same on both ends).
-* **F / S** – *(optional)* cipher mode:
-
-  * `F` – "Fast" (try AVX2 ChaCha20, fallback to ChaCha6)
-  * `S` – "Standard" (always ChaCha6)
 * **mtu** – *(optional)* effective MTU on external interface, *not WireGuard interface!* (default 1500).
 
 ### 2. Wire Firewall
@@ -132,7 +128,6 @@ nf_wgobfs [COMMAND]
 
                       start all NFQUEUEs in foreground
 --queue <n>           NFQUEUE number (default 0) in foreground
---check-cipher        detect best cipher mode (for manual specification in the config file)
 --generate-units      prepare systemd units to /tmp/nf_wgobfs
 ```
 
@@ -163,19 +158,7 @@ sudo systemctl start nf_wgobfs.target
 
 ## 🚦 CPU Compatibility
 
-* **x86‑64 with AVX2** → add `F` to the config file (ChaCha20‑AVX2 ~7 Gbps on R5 3600)  
-* **cloud ARM** (Graviton / Ampere) → use `S` in the config  
-* **legacy VPS (no SIMD)** → auto‑fallback to ChaCha6
-
----
-
-## 🏎 Benchmarks
-
-| Host                | Cipher        | Throughput | CPU |
-|---------------------|--------------|-----------:|----:|
-| Ryzen 5 3600        | ChaCha20‑AVX2| 5.9 Gbps   | 28% |
-| Neoverse N1 VM      | ChaCha6      | 2.7 Gbps   | 35% |
-| Raspberry Pi 4      | ChaCha6      | 1.1 Gbps   | 62% |
+Tested CPUs you can find on [fast_chacha](https://github.com/sh0rch/fast_chacha) [actions page](https://github.com/sh0rch/fast_chacha/actions/runs/15289911899)
 
 ---
 
