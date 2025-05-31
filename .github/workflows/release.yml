@@ -1,0 +1,267 @@
+name: Release
+
+permissions:
+  contents: write
+
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build-test-package:
+    name: Build, Test & Package
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            uses-cross: false
+          - target: i686-unknown-linux-musl
+            uses-cross: true
+          - target: aarch64-unknown-linux-musl
+            uses-cross: true
+          - target: mipsel-unknown-linux-musl
+            uses-cross: true
+          # - target: mips64el-unknown-linux-muslabi64
+          #   uses-cross: true
+          - target: mips-unknown-linux-musl
+            uses-cross: true
+          - target: mips64el-unknown-linux-gnuabi64
+            uses-cross: true
+          - target: mips64-unknown-linux-gnuabi64
+            uses-cross: true
+          # - target: mips64-unknown-linux-muslabi64
+          #   uses-cross: true
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libnetfilter-queue-dev musl-tools
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Enable QEMU (all arch)
+        if: runner.os == 'Linux'
+        uses: docker/setup-qemu-action@v2
+        with:
+          platforms: all
+          
+      - name: Install Rust target
+        if: matrix.uses-cross == false
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.uses-cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.5
+
+      - name: Install nightly toolchain
+        if: matrix.uses-cross == true
+        run: |
+          rustup toolchain install nightly
+          rustup component add rust-src --toolchain nightly
+
+      - name: Read crate version
+        id: ver
+        run: |
+          CRATE_VERSION=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+          echo "CRATE_VERSION=$CRATE_VERSION" >> $GITHUB_ENV
+          echo "VERSION=$CRATE_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install fpm dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby-dev build-essential musl-tools gcc-multilib libc6-dev
+          sudo gem install --no-document fpm
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.uses-cross }}" = "true" ]; then
+            cross +nightly build --target ${{ matrix.target }} -Z build-std=std,core,alloc  --verbose --release
+          else
+            cargo build --target ${{ matrix.target }}  --verbose --release
+          fi
+
+      - name: Test
+        run: |
+          if [ "${{ matrix.uses-cross }}" = "true" ]; then
+            cross +nightly test --target ${{ matrix.target }} -Z build-std=std,core,alloc --verbose -- --nocapture
+          else
+            cargo test --target ${{ matrix.target }} --verbose -- --nocapture
+          fi
+
+      - name: Determine package architectures (deb, rpm, apk)
+        id: detect_arch
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+
+            # 64-bit x86 (Rust) → 
+            x86_64-unknown-linux-musl)
+              pkg_arch_deb="amd64"
+              pkg_arch_rpm="x86_64"
+              pkg_arch_apk="x86_64"
+              ;;
+
+            # 32-bit x86 (Rust) →
+            i686-unknown-linux-musl)
+              pkg_arch_deb="i386"
+              pkg_arch_rpm="i686"
+              pkg_arch_apk="x86"
+              ;;
+
+            # 64-bit ARM (Rust) →
+            aarch64-unknown-linux-musl)
+              pkg_arch_deb="arm64"
+              pkg_arch_rpm="aarch64"
+              pkg_arch_apk="aarch64"
+              ;;
+
+            # little-endian MIPS (Rust) →
+            mipsel-unknown-linux-musl)
+              pkg_arch_deb="mipsel"
+              pkg_arch_rpm="mipsel"
+              pkg_arch_apk="mipsel"
+              ;;
+
+            # 32-bit MIPS (big-endian) (Rust) →
+            mips-unknown-linux-musl)
+              pkg_arch_deb="mips"
+              pkg_arch_rpm="mips"
+              pkg_arch_apk="mips"
+              ;;
+
+            # 64-bit MIPS little-endian, GNU ABI → 
+            mips64el-unknown-linux-gnuabi64)
+              pkg_arch_deb="mips64el"
+              pkg_arch_rpm="mips64el"
+              pkg_arch_apk="mips64el"
+              ;;
+
+            # 64-bit MIPS big-endian, GNU ABI →
+            mips64-unknown-linux-gnuabi64)
+              pkg_arch_deb="mips64"
+              pkg_arch_rpm="mips64"
+              pkg_arch_apk="mips64"
+              ;;
+
+            *)
+              echo "Unsupported target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+          echo "ARCH_DEB=$pkg_arch_deb" >> $GITHUB_ENV
+          echo "ARCH_RPM=$pkg_arch_rpm" >> $GITHUB_ENV
+          echo "ARCH_APK=$pkg_arch_apk" >> $GITHUB_ENV
+
+      - name: Prepare dist directory
+        run: |
+          mkdir -p dist/$ARCH_APK/raw/usr/bin
+          mkdir -p dist/$ARCH_APK/raw/etc/nf_wgobfs
+          mkdir -p dist/$ARCH_APK/raw/usr/share/doc/nf_wgobfs
+          mkdir -p dist/$ARCH_APK/raw/usr/share/licenses/nf_wgobfs
+          cp target/${{ matrix.target }}/release/nf_wgobfs dist/$ARCH_APK/raw/usr/bin/nf_wgobfs
+          cp ./config.example dist/$ARCH_APK/raw/etc/nf_wgobfs/config
+          cp ./LICENSE dist/$ARCH_APK/raw/usr/share/doc/nf_wgobfs/LICENSE
+          cp ./LICENSE dist/$ARCH_APK/raw/usr/share/licenses/nf_wgobfs/LICENSE
+          chmod 600 dist/$ARCH_APK/raw/etc/nf_wgobfs/config
+          chmod 755 dist/$ARCH_APK/raw/usr/bin/nf_wgobfs
+
+      - name: Package tar.gz
+        run: tar --owner=0 --group=0 -czf dist/${ARCH_APK}/nf_wgobfs-${CRATE_VERSION}-${ARCH_APK}.tar.gz -C dist/${ARCH_APK}/raw .
+
+      - name: Package deb
+        run: |
+          fpm -s dir -t deb \
+            -n nf_wgobfs \
+            -v $CRATE_VERSION \
+            --architecture $ARCH_DEB \
+            --package dist/$ARCH_APK/nf_wgobfs-$CRATE_VERSION-$ARCH_DEB.deb \
+            --deb-user root --deb-group root \
+            --depends libnetfilter-queue1 --prefix / \
+            --depends libnetfilter-queue1 \
+            dist/$ARCH_APK/raw/usr/bin/nf_wgobfs=usr/bin/nf_wgobfs \
+            dist/$ARCH_APK/raw/etc/nf_wgobfs/config=etc/nf_wgobfs/config \
+            dist/$ARCH_APK/raw/usr/share/doc/nf_wgobfs/LICENSE=usr/share/doc/nf_wgobfs/LICENSE
+
+      - name: Package rpm
+        run: |
+          fpm -s dir -t rpm \
+            -n nf_wgobfs \
+            -v $CRATE_VERSION \
+            --architecture $ARCH_RPM \
+            --rpm-user root --rpm-group root \
+            --prefix / \
+            --depends libnetfilter_queue \
+            --package dist/$ARCH_APK/nf_wgobfs-$CRATE_VERSION-$ARCH_RPM.rpm \
+            dist/$ARCH_APK/raw/usr/bin/nf_wgobfs=usr/bin/nf_wgobfs \
+            dist/$ARCH_APK/raw/etc/nf_wgobfs/config=etc/nf_wgobfs/config \
+            dist/$ARCH_APK/raw/usr/share/licenses/nf_wgobfs/LICENSE=usr/share/licenses/nf_wgobfs/LICENSE
+
+      - name: Package apk
+        run: |
+          fpm -s dir -t apk \
+            -n nf_wgobfs \
+            -v $CRATE_VERSION \
+            --architecture $ARCH_APK \
+            --prefix / \
+            --depends libnetfilter_queue \
+            --package dist/$ARCH_APK/nf_wgobfs-$CRATE_VERSION-$ARCH_APK.apk \
+            dist/$ARCH_APK/raw/usr/bin/nf_wgobfs=usr/bin/nf_wgobfs \
+            dist/$ARCH_APK/raw/etc/nf_wgobfs/config=etc/nf_wgobfs/config \
+            dist/$ARCH_APK/raw/usr/share/licenses/nf_wgobfs/LICENSE=usr/share/licenses/nf_wgobfs/LICENSE
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nf_wgobfs-${{ env.ARCH_APK }}
+          path: |
+            dist/${{ env.ARCH_APK }}/*.tar.gz
+            dist/${{ env.ARCH_APK }}/*.deb
+            dist/${{ env.ARCH_APK }}/*.rpm
+            dist/${{ env.ARCH_APK }}/*.apk
+
+  publish:
+    name: Publish Release Assets
+    needs: build-test-package
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download build artifacts for ${{ matrix.target }}
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Create or update Release
+        id: create_release
+        uses: ncipollo/release-action@v1
+        with:
+          tag:        ${{ github.ref_name }}
+          name:       Release ${{ github.ref_name }}
+          draft:      true
+          prerelease: false
+          allowUpdates: true
+          bodyFile: RELEASE.md
+          replacesArtifacts: false
+          artifacts: |
+            dist/**/*.tar.gz,
+            dist/**/*.deb,
+            dist/**/*.rpm,
+            dist/**/*.apk

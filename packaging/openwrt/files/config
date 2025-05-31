@@ -1,5 +1,0 @@
-# Default nf_wgobfs config file for OpenWrt
-key = deadbeefdeadbeefdeadbeefdeadbeef
-interface = eth0
-queue_num = 0
-mtu = 1420
