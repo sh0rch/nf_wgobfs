@@ -1,0 +1,15 @@
+FROM linuxserver/wireguard
+
+# Устанавливаем необходимые пакеты: iperf3 + nftables (для nfqueue)
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      iperf3 \
+      nftables \
+      iptables \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Копируем скрипт-запуск, где будут настрока nftables и запуск /init
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
