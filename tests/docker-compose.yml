@@ -1,0 +1,121 @@
+services:
+  # ----------------------------
+  # 1) FIRST WIREGUARD SERVER
+  # ----------------------------
+  wg_server1:
+    build: ./wg_server1
+    container_name: wg_server1
+    privileged: true                            # so that modprobe and nftables work
+    cap_add:
+      - NET_ADMIN                                # for configuring iptables/nftables and WireGuard
+      - NET_RAW
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - WG_PEER_IP=172.19.192.3
+      - SERVERURL=172.19.192.2
+      - PEERS=2
+      - PEERDNS=8.8.8.8
+      - INTERNAL_SUBNET=10.0.1.0
+      - ALLOWEDIPS=0.0.0.0/0 
+    volumes:
+      - ./wg_server1/config:/config              # your wg0.conf is mounted here
+    ports:
+      - "51820:51820/udp"                        # external WireGuard port for server1
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: 1        # required for wg routing
+    networks:
+      wg_net:
+        ipv4_address: 172.19.192.2
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    # no explicit networks; everything will go through the default bridge so containers can resolve each other by name
+
+  # ----------------------------
+  # 2) SECOND WIREGUARD SERVER
+  # ----------------------------
+  wg_server2:
+    build: ./wg_server2
+    container_name: wg_server2
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - WG_PEER_IP=172.19.192.2
+      - SERVERURL=172.19.192.3
+      - PEERS=2
+      - PEERDNS=8.8.8.8
+      - INTERNAL_SUBNET=10.0.2.0
+      - ALLOWEDIPS=0.0.0.0/0 
+    volumes:
+      - ./wg_server2/config:/config
+    ports:
+      - "51821:51820/udp"      # for example, to avoid conflict with the first server, map internal 51820→51821
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: 1
+    networks:
+      wg_net:
+        ipv4_address: 172.19.192.3
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+  # ----------------------------
+  # 3) CLIENT1 (WireGuard client + iperf3)
+  # ----------------------------
+  client1:
+    build: ./client1
+    container_name: client1
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+    volumes:
+      - ./client1/config:/config    # wg0.conf for client1
+    depends_on:
+      - wg_server1                 # start after the first server is up
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: 1
+    networks:
+      wg_net:
+        ipv4_address: 172.19.192.4
+
+  # ----------------------------
+  # 4) CLIENT2 (WireGuard client + iperf3)
+  # ----------------------------
+  client2:
+    build: ./client2
+    container_name: client2
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+    volumes:
+      - ./client2/config:/config    # wg0.conf for client2
+    depends_on:
+      - wg_server2
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: 1
+    networks:
+      wg_net:
+        ipv4_address: 172.19.192.5
+
+# In this example, the default bridge network is used so that containers can resolve each other by name.
+# E.g., client1 can reach wg_server1 by “wg_server1:51820/udp”, and wg_server1 can reach “wg_server2:51821/udp”, etc.
+
+networks:
+  wg_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.19.192.0/24
+          gateway: 172.19.192.1
