@@ -13,20 +13,13 @@ use std::env;
 use std::fs;
 use std::io::BufRead;
 
-/// Represents the direction of the filter rule (incoming or outgoing).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    In,
-    Out,
-}
-
 /// Holds the configuration for a single filter rule.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct FilterConfig {
     /// Netfilter queue number.
     pub queue_num: u16,
-    /// Direction of the filter (inbound or outbound).
-    pub direction: Direction,
+    /// Queue length.
+    pub queue_len: Option<u32>,
     /// 32-byte key derived from ASCII input.
     pub key: [u8; 32],
     /// Maximum Transmission Unit for this rule.
@@ -105,19 +98,14 @@ pub fn parse_config(input: &[String]) -> std::io::Result<Vec<FilterConfig>> {
                 "Duplicate queue number",
             ));
         }
-        let direction = match parts.next().map(|s| s.to_lowercase()) {
-            Some(ref s) if s == "in" => Direction::In,
-            Some(_) => Direction::Out,
-            None => return Err(std::io::ErrorKind::InvalidData.into()),
-        };
-        let _name = parts.next().map(str::to_string).ok_or(std::io::ErrorKind::InvalidData)?;
+        let queue_len = parts.next().and_then(|s| s.parse::<u32>().ok());
         let key_ascii = parts.next().ok_or(std::io::ErrorKind::InvalidData)?;
         let key = ascii_to_key(key_ascii.trim());
 
         // MTU: if there is another field and it is a number, use it; otherwise, default to 1500
         let mtu = parts.next_back().and_then(|s| s.parse::<u16>().ok()).unwrap_or(1500) as usize;
 
-        configs.push(FilterConfig { queue_num, direction, key, mtu });
+        configs.push(FilterConfig { queue_num, queue_len, key, mtu });
     }
     Ok(configs)
 }
@@ -145,11 +133,11 @@ mod tests {
     /// Tests parsing a full config line with all fields present.
     #[test]
     fn test_parse_config_line_full() {
-        let line = ["1:in:wg_in:abcdef0123456789abcdef0123456789:F:1350"];
+        let line = ["1:16384:abcdef0123456789abcdef0123456789:F:1350"];
         let line: Vec<String> = line.iter().map(|s| s.to_string()).collect();
         if let Ok(config) = parse_config(&line) {
             assert_eq!(config[0].queue_num, 1);
-            assert_eq!(config[0].direction, Direction::In);
+            assert_eq!(config[0].queue_len, Some(16384));
             assert_eq!(config[0].key, ascii_to_key("abcdef0123456789abcdef0123456789"));
             assert_eq!(config[0].mtu, 1350);
         } else {
@@ -161,24 +149,23 @@ mod tests {
     #[test]
     fn test_parse_config_line_full_and_defaults() {
         let lines = [
-            "0:out:wg_out:abcdef6760123456789abcdef0123456789:1350",
-            "1:in:wg_in:fjklabcdef0123456789abcdef0123456789",
-            "2:in:wg_in:mnopf0123456789abcdef0123456789",
-            "3:in:wg_in:mnopf0123456789abcdef0123456789",
+            "0:8192:abcdef6760123456789abcdef0123456789:1350",
+            "1:16384:fjklabcdef0123456789abcdef0123456789",
+            "2:16384:mnopf0123456789abcdef0123456789",
         ];
         let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
         if let Ok(configs) = parse_config(&lines) {
             assert_eq!(configs[0].queue_num, 0);
-            assert_eq!(configs[0].direction, Direction::Out);
+            assert_eq!(configs[0].queue_len, Some(8192 as u32));
             assert_eq!(configs[0].key, ascii_to_key("abcdef6760123456789abcdef0123456789"));
             assert_eq!(configs[0].mtu, 1350);
 
             assert_eq!(configs[1].queue_num, 1);
-            assert_eq!(configs[1].direction, Direction::In);
+            assert_eq!(configs[1].queue_len, Some(16384 as u32));
             assert_eq!(configs[1].key, ascii_to_key("fjklabcdef0123456789abcdef0123456789"));
             assert_eq!(configs[1].mtu, 1500); // Default MTU
             assert_eq!(configs[2].queue_num, 2);
-            assert_eq!(configs[2].direction, Direction::In);
+            assert_eq!(configs[2].queue_len, Some(16384 as u32));
             assert_eq!(configs[2].key, ascii_to_key("mnopf0123456789abcdef0123456789"));
             assert_eq!(configs[2].mtu, 1500); // Default MTU
         } else {
@@ -190,8 +177,8 @@ mod tests {
     #[test]
     fn test_parse_config_duplicate_queue_num() {
         let lines = [
-            "1:in:wg_in:abcdef0123456789abcdef0123456789:1350",
-            "1:out:wg_out:abcdef0123456789abcdef0123456789:1400", // duplicate queue_num
+            "1:16384:abcdef0123456789abcdef0123456789:1350",
+            "1:16384:abcdef0123456789abcdef0123456789:1400", // duplicate queue_num
         ];
         let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
         let result = parse_config(&lines);

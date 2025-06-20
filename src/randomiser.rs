@@ -27,7 +27,7 @@
 //! and filling byte buffers with random data. The seeding process combines system time,
 //! process ID, and additional entropy to improve unpredictability.
 
-use rand::rngs::SmallRng;
+pub use rand::rngs::SmallRng;
 use rand::{RngCore, SeedableRng};
 use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -15,6 +15,7 @@ mod cli;
 mod config;
 mod filter;
 mod netutils;
+mod nfqueue;
 mod randomiser;
 
 use std::thread;
@@ -56,7 +57,7 @@ fn main() -> std::io::Result<()> {
         cli::Command::Start(queue_num) => {
             // Start the filter for the specified queue number.
             let q = configs.iter().find(|f| f.queue_num == queue_num).unwrap();
-            filter::queue::run_nfqueue_filter(q.clone())?;
+            filter::queue::run_nfqueue_filter(*q)?;
         }
         cli::Command::Version => {
             // Print application version.

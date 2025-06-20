@@ -1,211 +1,132 @@
 /*
  * Copyright (c) 2025 sh0rch <sh0rch@iwl.dev>
+ * SPDX-License-Identifier: MIT
  *
- * This file is part of nf_wgobfs.
- *
- * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ * This module implements a Netfilter queue (NFQUEUE) based packet filter for WireGuard obfuscation.
+ * It provides a main entry point to run the filter, handling panics and automatic restarts,
+ * and a child loop that processes packets from the queue, applying obfuscation or deobfuscation
+ * depending on the Netfilter hook.
  */
 
-//! # NFQUEUE-based WireGuard Packet Filter
-//!
-//! This module implements a packet filter using Linux NFQUEUE for obfuscating and deobfuscating
-//! WireGuard packets. It provides an event loop that binds to a specified NFQUEUE, processes
-//! packets according to the configured direction (inbound or outbound), and sets the appropriate
-//! verdict (accept or drop) for each packet.
-//!
-//! ## Features
-//! - Binds to a user-specified NFQUEUE number.
-//! - Receives packets from the kernel, applies obfuscation or deobfuscation, and sets verdicts.
-//! - Handles panics and errors gracefully, automatically restarting the handler as needed.
-//! - Supports configurable MTU and direction for flexible deployment.
-//!
-//! ## Usage
-//! Use [`run_nfqueue_filter`] to start the event loop with a given [`FilterConfig`].
-//!
-//! ## Safety
-//! Panics are caught and logged; the handler is automatically restarted to ensure robustness.
-
-use crate::config::{Direction, FilterConfig};
+use crate::config::FilterConfig;
 use crate::filter::keepalive::KeepaliveDropper;
 use crate::filter::obfuscator::{deobfuscate_wg_packet, obfuscate_wg_packet};
+use crate::nfqueue::{self, Hook, NfqQueue};
 use crate::randomiser;
-use nfq::{Queue, Verdict};
-use std::panic;
-use std::thread;
-use std::time::Duration;
+use std::{panic, thread, time::Duration};
 
-/// Runs the NFQUEUE filter event loop.
-///
-/// This function binds to the specified NFQUEUE and enters a loop where it receives packets,
-/// applies obfuscation or deobfuscation depending on the direction, and sets the verdict
-/// (accept or drop) for each packet. If an error or panic occurs, the handler is restarted
-/// after a short delay to ensure continuous operation.
+/// Runs the NFQUEUE-based filter in a loop, automatically restarting on panic.
 ///
 /// # Arguments
-/// * `filter` - The filter configuration, including queue number, direction, MTU, etc.
+/// * `filter` - The filter configuration specifying queue number, length, MTU, etc.
 ///
 /// # Returns
-/// * `std::io::Result<()>` - Returns `Ok(())` on success, or an error if the handler fails to start.
+/// * `std::io::Result<()>` - Returns Ok(()) on success, or an error if the filter fails to start.
 ///
-/// # Panics
-/// Panics are caught and logged; the handler is restarted automatically.
-///
-/// # Example
-/// ```no_run
-/// use crate::config::FilterConfig;
-/// run_nfqueue_filter(FilterConfig::default()).unwrap();
-/// ```
+/// This function catches panics in the child process, logs the error, waits for a second,
+/// and then restarts the NFQUEUE filter. This ensures robustness against unexpected failures.
 pub fn run_nfqueue_filter(filter: FilterConfig) -> std::io::Result<()> {
     loop {
-        // Catch panics to allow automatic restart of the handler
-        let result: Result<std::io::Result<()>, Box<dyn std::any::Any + Send>> =
-            panic::catch_unwind(|| {
-                // Open the NFQUEUE socket for packet interception
-                let mut q =
-                    Queue::open().map_err(|e| panic!("Failed to open NFQUEUE: {e}")).unwrap();
+        let result = panic::catch_unwind(|| {
+            let qlen: u32 = filter.queue_len.unwrap_or(1024);
+            let qnum = filter.queue_num;
+            let mtu = filter.mtu;
+            let _pid = NfqQueue::spawn(qnum, qlen, mtu, move |q| child_loop(q, &filter))
+                .map_err(|e| panic!("NFQUEUE spawn: errno {e}"))
+                .unwrap();
 
-                // Bind to the specified queue number
-                q.bind(filter.queue_num)
-                    .map_err(|e| {
-                        panic!(
-                            "Failed to bind NFQUEUE {}: {}. \
-                    Probably, the queue is already occupied by another process. \
-                    Try selecting another queue through the NF_WGOBFS_QUEUE environment variable.",
-                            filter.queue_num, e
-                        );
-                    })
-                    .unwrap();
+            #[cfg(debug_assertions)]
+            println!("NFQUEUE{} child PID {}, backlog {}, mtu {}", qnum, _pid, qlen, mtu);
 
-                #[cfg(debug_assertions)]
-                {
-                    println!(
-                        "User-space filter started (NFQUEUE{}), direction {:?}, mtu {}",
-                        filter.queue_num, filter.direction, filter.mtu
-                    );
-                }
+            nfqueue::wait_forever_until_signal();
+        });
 
-                // Allocate buffer for packet processing
-                let buf_size = filter.mtu + 80;
-                let mut buf = vec![0u8; buf_size];
-                let mut rng = randomiser::create_secure_rng();
-                let mut keepalive_dropper = KeepaliveDropper::new(0, 9);
-
-                // Main packet processing loop
-                loop {
-                    // Receive a packet from the queue
-                    let mut msg = q.recv().expect("Failed to receive from NFQUEUE");
-                    let pkt = msg.get_payload();
-                    let len = pkt.len();
-                    buf[..len].copy_from_slice(pkt);
-
-                    #[cfg(debug_assertions)]
-                    println!(
-                        "New packet in NFQUEUE {}: len={}, verdict={:?}",
-                        filter.queue_num,
-                        len,
-                        msg.get_verdict()
-                    );
-
-                    #[cfg(debug_assertions)]
-                    println!(
-                        "NFQUEUE {}: direction {:?}, payload_len={}",
-                        filter.queue_num, filter.direction, len
-                    );
-
-                    // Process packet based on direction
-                    match filter.direction {
-                        Direction::Out => {
-                            #[cfg(debug_assertions)]
-                            println!("Before obfuscation ({}): {:02x?}", len, &buf[..len]);
-
-                            // Attempt to obfuscate the packet
-                            if let Some(new_len) = obfuscate_wg_packet(
-                                &mut buf,
-                                len,
-                                &filter,
-                                &mut keepalive_dropper,
-                                &mut rng,
-                            ) {
-                                #[cfg(debug_assertions)]
-                                {
-                                    println!(
-                                        "After obfuscation ({}): {:02x?}",
-                                        new_len,
-                                        &buf[..new_len]
-                                    );
-                                }
-                                msg.set_payload(&buf[..new_len]);
-                                msg.set_verdict(Verdict::Accept);
-                            } else {
-                                #[cfg(debug_assertions)]
-                                {
-                                    println!("Obfuscation skipped");
-                                }
-                                msg.set_verdict(Verdict::Drop);
-                            }
-                        }
-                        Direction::In => {
-                            #[cfg(debug_assertions)]
-                            {
-                                println!("Deobfuscating packet ({}): {:02x?}", len, &buf[..len]);
-                            }
-
-                            // Attempt to deobfuscate the packet
-                            if let Some(new_len) = deobfuscate_wg_packet(&mut buf[..len], &filter) {
-                                #[cfg(debug_assertions)]
-                                {
-                                    println!(
-                                        "Deobfuscated packet ({}): {:02x?}",
-                                        new_len,
-                                        &buf[..new_len]
-                                    );
-                                }
-                                msg.set_payload(&buf[..new_len]);
-                                msg.set_verdict(Verdict::Accept);
-                            } else {
-                                #[cfg(debug_assertions)]
-                                {
-                                    println!("Deobfuscation skipped");
-                                }
-                                msg.set_verdict(Verdict::Drop);
-                            }
-                        }
-                    }
-
-                    #[cfg(debug_assertions)]
-                    {
-                        println!(
-                            "NFQUEUE {}: verdict={:?}, payload_len={}",
-                            filter.queue_num,
-                            msg.get_verdict(),
-                            msg.get_payload().len()
-                        );
-                    }
-                    // Send verdict back to the queue
-                    q.verdict(msg)?;
-                }
-            });
-
-        // Handle errors and panics, restart the handler if needed
         match result {
-            Ok(Ok(())) => break,
-            Ok(Err(e)) => {
-                eprintln!("NFQUEUE error: {e:?}");
-                thread::sleep(Duration::from_secs(1));
-                eprintln!("Restarting NFQUEUE handler...");
-            }
+            Ok(()) => break,
             Err(e) => {
                 if let Some(msg) = e.downcast_ref::<&str>() {
                     eprintln!("NFQUEUE panic: {msg}");
                 } else if let Some(msg) = e.downcast_ref::<String>() {
                     eprintln!("NFQUEUE panic: {msg}");
                 } else {
-                    eprintln!("NFQUEUE panic: unknown error");
+                    eprintln!("NFQUEUE panic: unknown");
                 }
                 thread::sleep(Duration::from_secs(1));
-                eprintln!("Restarting NFQUEUE handler after panic...");
+                eprintln!("Restarting NFQUEUE after panic...");
             }
         }
     }
     Ok(())
+}
+
+/// The main loop for processing packets from the NFQUEUE.
+///
+/// # Arguments
+/// * `q` - Mutable reference to the NfqQueue instance.
+/// * `filter` - Reference to the filter configuration.
+///
+/// # Behavior
+/// This function runs indefinitely, receiving packets from the queue and processing them
+/// according to the Netfilter hook:
+/// - For outgoing packets (LocalOut, PostRouting), it applies obfuscation.
+/// - For incoming packets (LocalIn, Ingress, PreRouting), it applies deobfuscation.
+/// - For unknown hooks, the packet is dropped.
+///
+/// Debug output is printed if compiled in debug mode.
+fn child_loop(q: &mut NfqQueue, filter: &FilterConfig) -> ! {
+    let mut rng = randomiser::create_secure_rng();
+    let mut dropper = KeepaliveDropper::new(80);
+    loop {
+        let pkt = match q.recv() {
+            Ok(p) => p,
+            Err(-2) => continue,
+            Err(errno) => {
+                eprintln!("NFQUEUE recv errno {errno}, retry...");
+                continue;
+            }
+        };
+
+        let len = pkt.payload_len;
+        let payload = unsafe { q.payload_mut() };
+        #[cfg(debug_assertions)]
+        println!("NFQUEUE{}: hook={:?}, payload_len={}", filter.queue_num, pkt.hook, len);
+
+        match pkt.hook {
+            Hook::LocalOut | Hook::PostRouting => {
+                #[cfg(debug_assertions)]
+                println!("Before obfuscation ({}): {:02x?}", len, &payload[..len]);
+
+                if let Some(new_len) =
+                    obfuscate_wg_packet(payload, len, filter, &mut dropper, &mut rng)
+                {
+                    #[cfg(debug_assertions)]
+                    println!("After obfuscation ({}): {:02x?}", new_len, &payload[..new_len]);
+                    q.accept_pkt(new_len).unwrap();
+                } else {
+                    #[cfg(debug_assertions)]
+                    println!("Obfuscation skipped");
+                    q.drop_pkt().unwrap();
+                }
+            }
+            Hook::LocalIn | Hook::Ingress | Hook::PreRouting => {
+                #[cfg(debug_assertions)]
+                println!("De-obfuscating packet ({}): {:02x?}", len, &payload[..len]);
+
+                if let Some(new_len) = deobfuscate_wg_packet(payload, len, filter) {
+                    #[cfg(debug_assertions)]
+                    println!("De-obfuscated ({}): {:02x?}", new_len, &payload[..new_len]);
+                    q.accept_pkt(new_len).unwrap();
+                } else {
+                    #[cfg(debug_assertions)]
+                    println!("Failed de-obfuscation → DROP");
+                    q.drop_pkt().unwrap();
+                }
+            }
+            _ => {
+                #[cfg(debug_assertions)]
+                println!("Unknown hook {:?} → DROP", pkt.hook);
+                q.drop_pkt().unwrap();
+            }
+        }
+    }
 }

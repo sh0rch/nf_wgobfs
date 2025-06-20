@@ -4,19 +4,21 @@
 # Format:
 # QUEUE_NUM:DIRECTION:PORT:SECRET_KEY[:MTU]
 #
-# QUEUE_NUM   - The NFQUEUE number to use (integer, e.g. 0 or 1). MUST BE unique.
-# DIRECTION   - Packet direction: "in" for incoming, "out" for outgoing.
-# # NAME        - Any string to identify the queue (e.g. "wg0-in", "wg0-out").
-# SECRET_KEY  - Any string; it will be hashed to a 32-byte key for obfuscation.
-# MTU         - (Optional) MTU of the external (physical) interface, NOT the WireGuard interface.
-#               If omitted, the default is 1500.
-#
-# IMPORTANT: The cipher mode (F|S) and the secret key MUST be the same on both sides of the tunnel.
-# For example, use "in:key:F" on one side and "out:key:F" on the other side.
+# QUEUE_NUM   - The NFQUEUE number to use (integer, e.g. 0 or 1).
+#               MUST BE unique.
+# QUEUE_LEN   - The maximum length of the NFQUEUE (QUEUE_MAX_LEN). 
+#               Controls how many packets can be queued before dropping.
+# SECRET_KEY  - Any string; it will be hashed to a 32-byte key for 
+#               obfuscation.
+# MTU         - (Optional) MTU of the external (physical) interface, 
+#               NOT the WireGuard interface. If omitted, the default is 1500.
 #
 # Default config location: /etc/nf_wgobfs/config
-# You can override the location by setting the NF_WGOBFS_CONF environment variable.
+# You can override the location by setting the NF_WGOBFS_CONF environment
+# variable.
 #
 # Example entries:
-0:in:Test:secretkey:1500
-1:out:Test:secretkey
+# 0:16384:secretkey:1500
+# 1:8192:secretkey
+#
+0:4096:secretkey

@@ -48,8 +48,8 @@ use rand::rngs::SmallRng;
 use rand::Rng;
 
 const NONCE_LEN: usize = 12;
-const MAC2_LEN: usize = 16;
-const BALLAST_LEN_MAX: usize = 65;
+//const MAC2_LEN: usize = 16;
+//const BALLAST_LEN_MAX: usize = 65;
 
 /// Obfuscates a WireGuard packet in-place.
 ///
@@ -79,68 +79,60 @@ pub fn obfuscate_wg_packet(
     dropper: &mut KeepaliveDropper,
     rng: &mut SmallRng,
 ) -> Option<usize> {
-    if len < 1 || len > config.mtu {
-        return Some(len);
-    }
+    // if len < 45 {
+    //     return None;
+    // }
+    // if len > config.mtu {
+    //     return None;
+    // }
 
     // Determine IP version and calculate start of WireGuard payload
     let ip_version = buf[0] >> 4;
     let wg_start = match ip_version {
         4 => ((buf[0] & 0x0F) as usize) * 4 + 8,
         6 => 48,
-        _ => return Some(len),
+        _ => return None,
     };
 
-    if len < wg_start + 32 {
-        return Some(len);
-    }
-
-    let wg_payload = &buf[wg_start..len];
-    if matches!(dropper.filter_packet(wg_payload), PacketDecision::Drop) {
+    if matches!(dropper.filter_packet(&buf[wg_start], len - wg_start, rng), PacketDecision::Drop) {
+        // Drop keepalive packet
         return None;
     }
 
     // Calculate how much random ballast can be inserted
-    let max_insert = config.mtu.saturating_sub(len);
-    let max_ballast = max_insert.saturating_sub(1 + NONCE_LEN).min(BALLAST_LEN_MAX);
-    let ballast_len = if max_ballast >= 3 { rng.random_range(3..=max_ballast) } else { 0 };
+    let max_insert = config.mtu - len - 13;
+    // if max_insert > 255
+    let max_ballast = if max_insert < 255 { max_insert } else { 255 };
+    let ballast_len = if max_insert >= 1 { rng.random_range(1..max_ballast) } else { 0 };
 
-    let new_len = len + 1 + ballast_len + NONCE_LEN;
+    let new_len = len + NONCE_LEN + ballast_len + 1;
     if new_len > buf.len() {
         return None;
     }
 
     // Generate random nonce
-    let mut nonce = [0u8; NONCE_LEN];
-    fill_random(&mut nonce, rng);
 
     // Prepare block for encryption: first 16 bytes of payload, ballast length, MAC2
-    let mut block = [0u8; 33];
-    block[..16].copy_from_slice(&buf[wg_start..wg_start + 16]);
-    block[16] = ballast_len as u8;
-    block[17..].copy_from_slice(&buf[len - MAC2_LEN..len]);
+    let mut offset = len + ballast_len;
+    fill_random(&mut buf[len..new_len], rng);
+
+    // let mut nonce = [0u8; NONCE_LEN];
+    // fill_random(&mut nonce, rng);
+
+    buf[offset] = ballast_len as u8;
+    offset += 1;
 
     // Encrypt block with ChaCha20
-    let mut cipher = FastChaCha20::new(&config.key, &nonce);
-    cipher.apply_keystream(&mut block);
+    let mut cipher = FastChaCha20::new(
+        &config.key,
+        (&buf[offset..new_len]).try_into().expect("nonce slice has incorrect length"),
+    );
+    let crypt = if offset - wg_start > 192 { wg_start + 192 } else { offset };
+    cipher.apply_keystream(&mut buf[wg_start..crypt]);
+    //buf[offset..new_len].copy_from_slice(&nonce);
 
-    // Write encrypted fields back to buffer
-    buf[wg_start..wg_start + 16].copy_from_slice(&block[..16]);
-
-    // Insert random ballast instead of MAC2
-    let mut offset = len - MAC2_LEN;
-    fill_random(&mut buf[offset..offset + ballast_len], rng);
-    offset += ballast_len;
-
-    // Insert encrypted ballast length and MAC2
-    buf[offset] = block[16];
-    offset += 1;
-    buf[offset..offset + MAC2_LEN].copy_from_slice(&block[17..]);
-    offset += MAC2_LEN;
-
-    // Append nonce
-    buf[offset..offset + NONCE_LEN].copy_from_slice(&nonce);
-
+    //cipher.apply_keystream(&mut buf[wg_start..len]);
+    //buf[len..new_len].copy_from_slice(&nonce);
     // Fix headers to reflect new packet size
     match ip_version {
         4 => {
@@ -173,10 +165,9 @@ pub fn obfuscate_wg_packet(
 /// - Restores the original MAC2 field and packet structure.
 /// - Fixes UDP and IP headers to match the restored packet.
 #[inline(always)]
-pub fn deobfuscate_wg_packet(buf: &mut [u8], config: &FilterConfig) -> Option<usize> {
-    let len = buf.len();
+pub fn deobfuscate_wg_packet(buf: &mut [u8], len: usize, config: &FilterConfig) -> Option<usize> {
     if len < 1 {
-        return Some(len);
+        return None;
     }
 
     // Determine IP version and calculate start of WireGuard payload
@@ -184,55 +175,44 @@ pub fn deobfuscate_wg_packet(buf: &mut [u8], config: &FilterConfig) -> Option<us
     let wg_start = match ip_version {
         4 => ((buf[0] & 0x0F) as usize) * 4 + 8,
         6 => 48,
-        _ => return Some(len),
+        _ => return None,
     };
     // Ensure packet is large enough for deobfuscation
-    if len <= wg_start + 45 {
-        return Some(len);
-    }
+    // if len <= wg_start + 32 {
+    //     return None;
+    // }
 
     // Extract nonce from the end of the packet
-    let nonce_offset = len - NONCE_LEN;
-    let mut nonce = [0u8; NONCE_LEN];
-    nonce.copy_from_slice(&buf[nonce_offset..len]);
-    let mut cipher = FastChaCha20::new(&config.key, &nonce);
-
-    // Extract encrypted block (fields + ballast length + MAC2)
-    let offset = len - 1 - NONCE_LEN - MAC2_LEN;
-    let mut block = [0u8; 33];
-    block[..16].copy_from_slice(&buf[wg_start..wg_start + 16]);
-    block[16..].copy_from_slice(&buf[offset..len - NONCE_LEN]);
+    let mut offset = len - NONCE_LEN;
+    let mut cipher = FastChaCha20::new(
+        &config.key,
+        (&buf[offset..len]).try_into().expect("nonce slice has incorrect length"),
+    );
 
     // Decrypt block
-    cipher.apply_keystream(&mut block);
+    let crypt = if offset - wg_start > 192 { wg_start + 192 } else { offset };
+    cipher.apply_keystream(&mut buf[wg_start..crypt]);
 
-    // Restore original fields
-    buf[wg_start..wg_start + 16].copy_from_slice(&block[..16]);
-    let ballast_len = block[16] as usize;
-
-    // Check minimum length after removing ballast and nonce
-    let min_len = ballast_len + 45;
-    if len < min_len {
-        return Some(len);
-    }
-
-    // Calculate new length and restore MAC2
-    let new_len = len - 1 - ballast_len - NONCE_LEN;
-    buf[new_len - MAC2_LEN..new_len].copy_from_slice(&block[17..]);
+    offset -= 1;
+    let ballast_len = buf[offset] as usize;
+    offset -= ballast_len; // Remove ballast bytes
 
     // Fix UDP and IP headers as needed
+
     match ip_version {
-        4 => ipv4::fix_udp_headers(&mut buf[..new_len]),
-        6 => ipv6::fix_udp_headers(&mut buf[..new_len]),
-        _ => {}
+        4 => ipv4::fix_udp_headers(&mut buf[..offset]),
+        6 => ipv6::fix_udp_headers(&mut buf[..offset]),
+        _ => return None,
     }
 
-    Some(new_len)
+    Some(offset)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{ascii_to_key, Direction, FilterConfig};
+    //use std::vec;
+
+    use crate::config::{ascii_to_key, FilterConfig};
 
     use super::*;
     use rand::rngs::SmallRng;
@@ -260,22 +240,37 @@ mod tests {
         ];
 
         let mut config =
-            FilterConfig { mtu: 256, key: [0u8; 32], queue_num: 0, direction: Direction::Out };
-        let mut dropper = KeepaliveDropper::new(0, 9);
+            FilterConfig { mtu: 256, key: [0u8; 32], queue_num: 0, queue_len: Some(1024) };
+        let mut dropper = KeepaliveDropper::new(80);
         let mut rng = SmallRng::from_seed([0u8; 32]);
 
         let mut buf = [0u8; 256];
         buf[..before.len()].copy_from_slice(&before);
-        config.direction = Direction::Out;
+
+        // Obfuscate the packet
         config.key = ascii_to_key("secretkey");
+        let obf_len =
+            obfuscate_wg_packet(&mut buf, before.len(), &config, &mut dropper, &mut rng).unwrap();
+        //buf.truncate(obf_len);
+        assert!(obf_len > before.len(), "obfuscated packet length should be greater than original");
+        assert!(obf_len <= buf.len(), "obfuscated packet length should not exceed buffer size");
+        let deobf_len = deobfuscate_wg_packet(&mut buf, obf_len, &config).unwrap();
 
-        let obf_len = obfuscate_wg_packet(&mut buf, before.len(), &config, &mut dropper, &mut rng)
-            .expect("obfuscation failed");
+        println!(
+            "obfuscated length: {}, deobfuscated length: {}, original length: {}",
+            obf_len,
+            deobf_len,
+            before.len()
+        );
+        assert!(
+            deobf_len <= obf_len,
+            "deobfuscated packet length should not exceed original length"
+        );
+        assert!(
+            deobf_len >= before.len() - 1,
+            "deobfuscated packet length should be at least original length minus nonce"
+        );
 
-        config.direction = Direction::In;
-        let deobf_len =
-            deobfuscate_wg_packet(&mut buf[..obf_len], &config).expect("deobfuscation failed");
-
-        assert_eq!(&buf[..deobf_len], &before[..], "deobfuscated != original");
+        assert_eq!(&buf[..deobf_len], &before, "deobfuscated != original");
     }
 }

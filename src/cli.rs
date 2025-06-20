@@ -139,28 +139,35 @@ WantedBy=multi-user.target
     }
 
     // Generate a target unit that wants all generated service units
-    let wants = unit_names.join(" ");
+    let services = unit_names.join(" ");
     let target = format!(
         r#"[Unit]
 Description=NFQUEUE WireGuard Obfuscator (all queues)
-Requires=multi-user.target
-Wants={wants}
+After=network.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'systemctl start {services}'
+ExecStop=/bin/bash -c 'systemctl stop {services}'
+
 
 [Install]
 WantedBy=multi-user.target
 "#,
-        wants = wants
+        services = services
     );
-    let target_filename = format!("{}/nf_wgobfs.target", out_dir);
+    let target_filename = format!("{}/nf_wgobfs-all.service", out_dir);
     fs::write(&target_filename, target)?;
     println!("Generated {}", target_filename);
 
     // Print instructions for installing and activating the units
     println!("\nTo install and activate these units, run:");
     println!("  sudo cp /tmp/nf_wgobfs/nf_wgobfs@*.service /etc/systemd/system/");
-    println!("  sudo cp /tmp/nf_wgobfs/nf_wgobfs.target /etc/systemd/system/");
+    println!("  sudo cp /tmp/nf_wgobfs/nf_wgobfs-all.service /etc/systemd/system/");
     println!("  sudo systemctl daemon-reload");
-    println!("  sudo systemctl enable nf_wgobfs.target");
-    println!("  sudo systemctl start nf_wgobfs.target");
+    println!("  sudo systemctl enable nf_wgobfs-all.service");
+    println!("  sudo systemctl start nf_wgobfs-all.service");
     Ok(())
 }
