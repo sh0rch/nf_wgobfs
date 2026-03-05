@@ -1,11 +1,39 @@
 
 # 🛡️ nf-wgobfs
 
-**nf‑wgobfs** is a high‑performance user‑space filter written in Rust for *obfuscating WireGuard traffic*.  
-It hides WireGuard’s easily recognizable packet structure from DPI—including machine learning engines—by (1) encrypting the WG header and MAC2, (2) inserting random ballast and a nonce, and (3) reshaping keep-alives.  
-The filter works over **NFQUEUE**, so it can be dropped into iptables or nftables without kernel modules—perfect for containers and cloud hosts.
+⚠️ **Project archived**
 
----
+This project is no longer actively developed and has been moved to archive status.
+
+Originally `nf_wgobfs` implemented WireGuard traffic obfuscation using the Linux
+**netfilter/NFQUEUE** pipeline. One of the planned future directions was migration
+to **eBPF-based packet filtering** to eliminate NFQUEUE overhead and move packet
+processing fully into the kernel datapath.
+
+This work has since been completed in a successor project.
+
+## Successor project
+
+The development has continued in **gutd**:
+
+https://github.com/sh0rch/gutd
+
+Key milestones:
+
+- **v1.2.0** — first TC/XDP eBPF implementation of the obfuscation approach  
+  (conceptual successor of `nf_wgobfs`, but **not wire-compatible**).
+- **v2.0.0** and current **main** — a more advanced implementation using
+  **QUIC-like traffic patterns** and improved obfuscation techniques.
+
+## Project lineage
+
+
+nf_wgobfs → gutd (eBPF / TC / XDP)
+
+
+If you are looking for a maintained implementation, please use **gutd**.
+
+___
 
 ## ✨ Features
 
